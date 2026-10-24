@@ -376,7 +376,12 @@ def _resolve_spoofed_ip(params: dict | None = None, json_body: dict | None = Non
         ip.startswith("172.18.") or 
         ip.startswith("172.19.") or 
         ip.startswith("172.2") or 
-        ip.startswith("172.3")
+        ip.startswith("172.3") or
+        ip.startswith("216.24.") or
+        ip.startswith("104.") or
+        ip.startswith("172.6") or
+        ip.startswith("172.7") or
+        ip.startswith("162.158.")
     ):
         return "103.191.240.1"
 
@@ -391,14 +396,12 @@ async def _api_get(path: str, params: dict | None = None, retry: bool = True) ->
         **DEFAULT_HEADERS,
         "Authorization": f"Bearer {token}" if token else ""
     }
-    ip = _resolve_spoofed_ip(params=params)
-    if ip:
-        headers.update({
-            "X-Forwarded-For": ip,
-            "X-Real-IP": ip,
-            "Client-IP": ip,
-            "CF-Connecting-IP": ip
-        })
+    ip = _resolve_spoofed_ip(params=params) or "103.191.240.1"
+    headers.update({
+        "X-Forwarded-For": ip,
+        "X-Real-IP": ip,
+        "Client-IP": ip,
+    })
 
     client = _get_client()
     r = await client.get(BASE + path, params=params or {}, headers=headers)
@@ -1549,54 +1552,85 @@ async def _fetch_moviebox_play_streams(
     dash = []
 
     try:
-        domain = await _get_player_domain()
-
         eff_se = int(se or 1) if is_series else 0
         eff_ep = int(ep or 1) if is_series else 0
 
-        type_str = "/tv/detail" if is_series else "/movie/detail"
-        player_referer = (
-            f"{domain}/spa/videoPlayPage/movies/{detail_path}"
-            f"?id={subject_id}&type={type_str}&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
-        )
-        play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={detail_path}"
-
         token = await _get_bearer_token()
-        ip = _resolve_spoofed_ip()
+        ip = _resolve_spoofed_ip() or "103.191.240.1"
         ip_headers = {
             "X-Forwarded-For": ip,
             "X-Real-IP": ip,
             "Client-IP": ip,
-            "CF-Connecting-IP": ip,
-        } if ip else {}
-
-        headers = {
-            **PLAYER_HEADERS,
-            **ip_headers,
-            "Referer": player_referer,
-            "Authorization": f"Bearer {token}" if token else ""
         }
 
         client = _get_client()
-        play_resp = await client.get(play_url, headers=headers)
 
-        play_data = play_resp.json().get("data", {}) if play_resp.status_code == 200 else {}
+        # Multi-domain failover to ensure play streams are retrieved even if one domain blocks cloud IPs
+        candidate_domains = [
+            "https://officialmoviebox.com",
+            "https://h5-api.aoneroom.com",
+            "https://moviebox.ph",
+            "https://h5.aoneroom.com",
+        ]
+
+        play_data = {}
+        type_str = "/tv/detail" if is_series else "/movie/detail"
+
+        for domain in candidate_domains:
+            player_referer = (
+                f"{domain}/spa/videoPlayPage/movies/{detail_path}"
+                f"?id={subject_id}&type={type_str}&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
+            )
+            play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={detail_path}"
+
+            headers = {
+                **PLAYER_HEADERS,
+                **ip_headers,
+                "Referer": player_referer,
+                "Authorization": f"Bearer {token}" if token else ""
+            }
+
+            try:
+                play_resp = await client.get(play_url, headers=headers)
+                if play_resp.status_code in (401, 403):
+                    token = await _get_bearer_token(force_refresh=True)
+                    headers["Authorization"] = f"Bearer {token}" if token else ""
+                    play_resp = await client.get(play_url, headers=headers)
+
+                if play_resp.status_code == 200:
+                    cand_json = play_resp.json().get("data", {})
+                    if cand_json.get("streams") or cand_json.get("dash") or cand_json.get("hls"):
+                        play_data = cand_json
+                        break
+            except Exception:
+                continue
+
+        if not play_data.get("streams") and not play_data.get("dash") and detail_path != subject_id:
+            for domain in candidate_domains:
+                try:
+                    retry_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={subject_id}"
+                    player_referer = (
+                        f"{domain}/spa/videoPlayPage/movies/{subject_id}"
+                        f"?id={subject_id}&type={type_str}&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
+                    )
+                    headers = {
+                        **PLAYER_HEADERS,
+                        **ip_headers,
+                        "Referer": player_referer,
+                        "Authorization": f"Bearer {token}" if token else ""
+                    }
+                    retry_resp = await client.get(retry_url, headers=headers)
+                    if retry_resp.status_code == 200:
+                        cand_json = retry_resp.json().get("data", {})
+                        if cand_json.get("streams") or cand_json.get("dash") or cand_json.get("hls"):
+                            play_data = cand_json
+                            break
+                except Exception:
+                    continue
+
         streams = play_data.get("streams", [])
         dash = play_data.get("dash", [])
         hls = play_data.get("hls", [])
-
-        if not streams and not dash and detail_path != subject_id:
-            try:
-                retry_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={subject_id}"
-                retry_resp = await client.get(retry_url, headers=headers)
-                retry_data = retry_resp.json().get("data", {}) if retry_resp.status_code == 200 else {}
-                if retry_data.get("streams"):
-                    play_data = retry_data
-                    streams = play_data.get("streams", [])
-                    dash = play_data.get("dash", [])
-                    hls = play_data.get("hls", [])
-            except Exception:
-                pass
 
         for s in streams:
             url = s.get("url") or ""
@@ -1850,7 +1884,7 @@ async def get_download_links(
     episode_val = max(int(episode or 0), int(ep or 0))
 
     # Fast top-level cache hit (1-2ms)
-    slug_cache_key = f"download:{detail_path}:{season_val}:{episode_val}"
+    slug_cache_key = f"download:{detail_path}:{season_val}:{episode_val}:{dub or ''}"
     cached = _cache_get(slug_cache_key)
     if cached is not None:
         dur = round((time.perf_counter() - t_start) * 1000, 2)
@@ -1915,8 +1949,40 @@ async def get_download_links(
             eff_se = 1
             eff_ep = 1
 
-        # Check unified cache key by subject_id
-        cache_key = f"download:{subject_id}:{eff_se}:{eff_ep}"
+        # 1. Detect requested dub (query param or inferred from title / slug / corner)
+        eff_dub = dub
+        if not eff_dub and isinstance(title, str):
+            t_lower = title.lower()
+            dp_lower = str(detail_path or "").lower()
+            corner_lower = str(subject.get("corner") or "").lower()
+            if "[hindi]" in t_lower or "-hindi-" in dp_lower or corner_lower == "hindi":
+                eff_dub = "hindi"
+            elif "[french]" in t_lower or "version francaise" in t_lower or "-french-" in dp_lower or "-francaise-" in dp_lower:
+                eff_dub = "french"
+            elif "[russian]" in t_lower or "-russian-" in dp_lower:
+                eff_dub = "russian"
+            elif "[spanish]" in t_lower or "-spanish-" in dp_lower:
+                eff_dub = "spanish"
+            elif "[portuguese]" in t_lower or "-portuguese-" in dp_lower:
+                eff_dub = "portuguese"
+
+        target_subject_id = subject_id
+        target_detail_path = detail_path_slug
+        if eff_dub and isinstance(eff_dub, str):
+            dub_clean = eff_dub.lower().strip()
+            for d in raw_dubs:
+                d_name = str(d.get("lanName") or "").lower().strip()
+                d_code = str(d.get("lanCode") or "").lower().strip()
+                d_sid = str(d.get("subjectId") or "")
+                if dub_clean in d_name or dub_clean == d_code or dub_clean == d_sid:
+                    if d.get("subjectId"):
+                        target_subject_id = str(d["subjectId"])
+                    if d.get("detailPath"):
+                        target_detail_path = str(d["detailPath"])
+                    break
+
+        # Check unified cache key by target_subject_id and eff_dub
+        cache_key = f"download:{target_subject_id}:{eff_se}:{eff_ep}:{eff_dub or ''}"
         cached = _cache_get(cache_key)
         if cached is not None:
             dur = round((time.perf_counter() - t_start) * 1000, 2)
@@ -1935,22 +2001,6 @@ async def get_download_links(
         hls = []
         dash = []
         has_res = False
-
-        # 1. Check if dub is requested for Moviebox
-        target_subject_id = subject_id
-        target_detail_path = detail_path_slug
-        if dub and isinstance(dub, str):
-            dub_clean = dub.lower().strip()
-            for d in raw_dubs:
-                d_name = str(d.get("lanName") or "").lower().strip()
-                d_code = str(d.get("lanCode") or "").lower().strip()
-                d_sid = str(d.get("subjectId") or "")
-                if dub_clean in d_name or dub_clean == d_code or dub_clean == d_sid:
-                    if d.get("subjectId"):
-                        target_subject_id = str(d["subjectId"])
-                    if d.get("detailPath"):
-                        target_detail_path = str(d["detailPath"])
-                    break
 
         # 2. Fetch direct MovieBox official play streams (1080p, 720p, 480p, 360p all unlocked)
         mb_streams = await _fetch_moviebox_play_streams(
@@ -1973,10 +2023,10 @@ async def get_download_links(
                 is_series=is_series,
                 se=eff_se,
                 ep=eff_ep,
-                subject_id=subject_id,
-                detail_path=detail_path_slug,
+                subject_id=target_subject_id,
+                detail_path=target_detail_path,
                 dubs=raw_dubs,
-                dub=dub if isinstance(dub, str) else ""
+                dub=eff_dub or (dub if isinstance(dub, str) else "")
             )
             if net27_data and net27_data.get("streams"):
                 has_res = True
