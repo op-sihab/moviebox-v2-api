@@ -1576,10 +1576,10 @@ async def _fetch_moviebox_play_streams(
 
         # Multi-domain failover to ensure play streams are retrieved even if one domain blocks cloud IPs
         candidate_domains = [
-            "https://officialmoviebox.com",
             "https://h5-api.aoneroom.com",
-            "https://moviebox.ph",
             "https://h5.aoneroom.com",
+            "https://moviebox.ph",
+            "https://officialmoviebox.com",
         ]
 
         play_data = {}
@@ -1991,7 +1991,7 @@ async def get_download_links(
                     break
 
         # Check unified cache key by target_subject_id and eff_dub
-        cache_key = f"download:{target_subject_id}:{eff_se}:{eff_ep}:{eff_dub or ''}"
+        cache_key = f"download:v4:{target_subject_id}:{eff_se}:{eff_ep}:{eff_dub or ''}"
         cached = _cache_get(cache_key)
         if cached is not None:
             dur = round((time.perf_counter() - t_start) * 1000, 2)
