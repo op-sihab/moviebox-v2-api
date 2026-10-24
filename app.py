@@ -1163,6 +1163,13 @@ def _shape_seasons(details_data: dict) -> list[dict]:
     return seasons
 
 
+def _clean_dub_detail_path(dp: str) -> str:
+    if not dp:
+        return ""
+    # Strip language prefix injected by MovieBox like -hindi-, -french-, etc.
+    return re.sub(r'-(?:hindi|french|francaise|russian|spanish|portuguese)-', '-', dp, flags=re.IGNORECASE)
+
+
 def _shape_dubs(details_data: dict) -> list[dict]:
     """Build a clean list of available dubs/audio tracks from raw /detail payload."""
     data = details_data or {}
@@ -1170,9 +1177,11 @@ def _shape_dubs(details_data: dict) -> list[dict]:
     raw_dubs = subject.get("dubs") or []
     dubs = []
     for d in raw_dubs:
+        raw_dp = d.get("detailPath") or ""
+        cleaned_dp = _clean_dub_detail_path(raw_dp)
         dubs.append({
             "subject_id": str(d.get("subjectId")),
-            "detail_path": d.get("detailPath"),
+            "detail_path": cleaned_dp,
             "language_name": d.get("lanName"),
             "language_code": d.get("lanCode"),
             "is_original": d.get("original", False)
@@ -1949,27 +1958,27 @@ async def get_download_links(
             eff_se = 1
             eff_ep = 1
 
-        # 1. Detect requested dub (query param or inferred from title / slug / corner)
+        # 1. Detect requested dub (query param or inferred from title / corner)
         eff_dub = dub
         if not eff_dub and isinstance(title, str):
             t_lower = title.lower()
-            dp_lower = str(detail_path or "").lower()
             corner_lower = str(subject.get("corner") or "").lower()
-            if "[hindi]" in t_lower or "-hindi-" in dp_lower or corner_lower == "hindi":
+            if "[hindi]" in t_lower or corner_lower == "hindi":
                 eff_dub = "hindi"
-            elif "[french]" in t_lower or "version francaise" in t_lower or "-french-" in dp_lower or "-francaise-" in dp_lower:
+            elif "[french]" in t_lower or "version francaise" in t_lower:
                 eff_dub = "french"
-            elif "[russian]" in t_lower or "-russian-" in dp_lower:
+            elif "[russian]" in t_lower:
                 eff_dub = "russian"
-            elif "[spanish]" in t_lower or "-spanish-" in dp_lower:
+            elif "[spanish]" in t_lower:
                 eff_dub = "spanish"
-            elif "[portuguese]" in t_lower or "-portuguese-" in dp_lower:
+            elif "[portuguese]" in t_lower:
                 eff_dub = "portuguese"
 
         target_subject_id = subject_id
         target_detail_path = detail_path_slug
-        if eff_dub and isinstance(eff_dub, str):
-            dub_clean = eff_dub.lower().strip()
+        # Only switch target_subject_id to a different dub if the user explicitly supplied ?dub= query param
+        if dub and isinstance(dub, str):
+            dub_clean = dub.lower().strip()
             for d in raw_dubs:
                 d_name = str(d.get("lanName") or "").lower().strip()
                 d_code = str(d.get("lanCode") or "").lower().strip()
