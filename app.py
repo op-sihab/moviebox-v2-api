@@ -2308,6 +2308,25 @@ async def get_download_links(
 
 
 
+@app.get("/api/probe")
+async def probe_cdn(url: str):
+    """Probe CDN from Render Ubuntu container using curl and python."""
+    import subprocess, urllib.request
+    out = {}
+    try:
+        p = subprocess.run(["curl", "-i", "-s", "--max-time", "5", "-r", "0-50", "-H", "Referer: https://moviebox.ph/", url], capture_output=True, text=True)
+        out["curl_status"] = p.stdout[:300]
+    except Exception as e:
+        out["curl_error"] = str(e)
+    try:
+        async with httpx.AsyncClient(http2=False, timeout=5) as c:
+            r = await c.get(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-50", "User-Agent": "curl/8.2.1"})
+            out["httpx_http1"] = {"status": r.status_code, "text": r.text[:100]}
+    except Exception as e:
+        out["httpx_error"] = str(e)
+    return out
+
+
 @app.get("/api/proxy")
 async def proxy_stream(url: str, request: Request):
     """Ultra-fast zero-copy streaming proxy with moviebox.ph referer bypass and full HTTP Range support."""
