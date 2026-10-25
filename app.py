@@ -887,29 +887,43 @@ def health():
     return {"status": "ok"}
 
 
+def _is_ad_or_promo(title_str: str) -> bool:
+    if not title_str:
+        return True
+    tl = title_str.lower()
+    return any(p in tl for p in [
+        "invite", "free premium", "communities", "download app",
+        "telegram", "whatsapp", "contact us", "gift", "coins", "channel"
+    ])
+
+
 @app.get("/home")
 @app.get("/homepage")
 @app.get("/api/home")
 @app.get("/api/moviebox/home")
 async def get_moviebox_home():
-    """MovieBox H5 home feed with banners, movies, series, and animations directly from /wefeed-h5api-bff/home."""
-    cache_key = "home:formatted"
+    """Curated South Asian (Bangladesh & India) trending home feed with HD banners, Bollywood, South Indian, Anime, and TV hits."""
+    cache_key = "home:formatted:v2"
     cached = _cache_get(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
 
     try:
-        data = await _api_get("/wefeed-h5api-bff/home", {"host": "moviebox.ph"})
-        sections = []
+        # Use regional Bangladeshi/Indian feed containing relevant Bollywood, South Indian, Hindi Dubbed & Trending hits
+        data = await _api_get("/wefeed-h5api-bff/home", {"host": "moviebox.com.bd"})
+        raw_sections_map = {}
+        banner_section = None
+
         for op in (data or {}).get("operatingList", []) or []:
             op_type = op.get("type")
             title = op.get("title", "Featured")
+
             if op_type == "BANNER":
                 raw_banner_items = [
                     item for item in op.get("banner", {}).get("items", [])
-                    if item.get("title") and "Communities" not in item.get("title")
+                    if item.get("title") and not _is_ad_or_promo(item.get("title"))
                 ]
-                
+
                 # Concurrently enrich banner items with TMDB HD widescreen backdrop and logo
                 tmdb_tasks = [
                     _resolve_tmdb_info(
@@ -948,25 +962,88 @@ async def get_moviebox_home():
                         "tmdb_id": tmdb_id,
                         "slug": slug,
                         "subject_id": sid,
-                        "badge": sub.get("corner"),
+                        "badge": sub.get("corner") or ("Hindi Dub" if "[Hindi]" in name else None),
                         "detail_url": f"/details/{slug or sid}",
                         "stream_url": f"/download/{slug or sid}"
                     })
                 if items:
-                    sections.append({"section": "Banner", "count": len(items), "items": items})
+                    banner_section = {"section": "Banner", "count": len(items), "items": items}
+
             elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION", "CUSTOM", "SUBJECTS_SERIES"]:
+                t_clean = (title or "").replace("🔥", "").strip()
+                if "trending now" in t_clean.lower():
+                    s_name = "Trending Now"
+                elif t_clean.lower() == "bollywood":
+                    s_name = "Bollywood Blockbusters"
+                elif t_clean.lower() == "south indian":
+                    s_name = "South Indian Cinema"
+                elif t_clean.lower() == "hollywood":
+                    s_name = "Hollywood Blockbusters"
+                elif t_clean.lower() == "top series":
+                    s_name = "Top Trending Series"
+                elif t_clean.lower() == "top anime series":
+                    s_name = "Trending Anime"
+                elif t_clean.lower() == "indian dramas":
+                    s_name = "Indian Dramas & Shows"
+                elif t_clean.lower() == "western tv":
+                    s_name = "Western TV Hits"
+                elif t_clean.lower() == "best asian dramas":
+                    s_name = "Popular Asian Dramas"
+                elif t_clean.lower() == "cinema":
+                    s_name = "Latest In Cinema"
+                elif "short tv" in t_clean.lower():
+                    s_name = "Trending Mini-Series"
+                else:
+                    s_name = t_clean
+
+                valid_subjects = [
+                    sub for sub in op.get("subjects", [])
+                    if sub.get("title") and not _is_ad_or_promo(sub.get("title"))
+                ]
+
                 items = [{
                     "name": sub.get("title"),
                     "poster_url": (sub.get("cover") or {}).get("url"),
                     "slug": sub.get("detailPath"),
                     "subject_id": sub.get("subjectId"),
-                    "badge": sub.get("corner"),
+                    "badge": sub.get("corner") or (
+                        "Hindi Dub" if "[Hindi]" in (sub.get("title") or "")
+                        else ("Bengali" if "[Bengali]" in (sub.get("title") or "") else None)
+                    ),
                     "rating": sub.get("imdbRatingValue"),
                     "detail_url": f"/details/{sub.get('detailPath') or sub.get('subjectId')}",
                     "stream_url": f"/download/{sub.get('detailPath') or sub.get('subjectId')}"
-                } for sub in op.get("subjects", [])]
-                if items:
-                    sections.append({"section": title, "count": len(items), "items": items})
+                } for sub in valid_subjects]
+
+                if items and s_name.lower() not in raw_sections_map:
+                    raw_sections_map[s_name.lower()] = {"section": s_name, "count": len(items), "items": items}
+
+        # Curated priority ordering tailored for Bangladesh and Indian audiences
+        priority_order = [
+            "trending now",
+            "bollywood blockbusters",
+            "south indian cinema",
+            "hollywood blockbusters",
+            "top trending series",
+            "trending anime",
+            "indian dramas & shows",
+            "latest in cinema",
+            "western tv hits",
+            "popular asian dramas",
+            "trending mini-series",
+            "coming soon"
+        ]
+
+        sections = []
+        if banner_section:
+            sections.append(banner_section)
+
+        for p in priority_order:
+            if p in raw_sections_map:
+                sections.append(raw_sections_map.pop(p))
+
+        for s in raw_sections_map.values():
+            sections.append(s)
 
         result = {"status": "success", "cached": False, "sections": sections, "data": data}
         _cache_set(cache_key, result, HOMEPAGE_TTL)
