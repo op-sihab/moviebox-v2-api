@@ -2254,39 +2254,50 @@ async def get_download_links(
             if is_series and eff_ep > 0:
                 asyncio.create_task(_background_prefetch_next_ep(detail_path_slug, eff_se, eff_ep + 1))
 
-            # Gentle background pre-warm of at most 1-2 primary dubs with delay (avoids 429 rate limit)
+            # Concurrent parallel dub pre-warming using asyncio.gather
             if raw_dubs and len(raw_dubs) > 1:
-                async def _prewarm_other_dubs_task():
+                async def _warm_one_dub(d):
+                    d_sid = str(d.get("subjectId") or "")
+                    d_dp = str(d.get("detailPath") or d_sid)
+                    if not d_sid or d_sid == target_subject_id:
+                        return
                     try:
-                        await asyncio.sleep(2.0)  # Wait for primary stream to comfortably start playing
-                        for d in raw_dubs[:2]:
-                            d_sid = str(d.get("subjectId") or "")
-                            d_dp = str(d.get("detailPath") or d_sid)
-                            if d_sid and d_sid != target_subject_id:
-                                r = await _fetch_moviebox_play_streams(
-                                    subject_id=d_sid,
-                                    detail_path=d_dp,
-                                    is_series=is_series,
-                                    se=mapped_se,
-                                    ep=mapped_ep,
-                                    fetch_captions=False
-                                )
-                                if isinstance(r, dict) and r.get("files"):
-                                    dub_res = {
-                                        **result,
-                                        "files": r["files"],
-                                        "subtitles": r.get("subtitles", []),
-                                        "hls": r.get("hls", []),
-                                        "dash": r.get("dash", []),
-                                        "subject_id": d_sid,
-                                        "detail_path": d_dp,
-                                    }
-                                    _cache_set(f"download:v4:{d_sid}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
-                                    _cache_set(f"download:{d_dp}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
-                                await asyncio.sleep(1.0)
+                        r = await _fetch_moviebox_play_streams(
+                            subject_id=d_sid,
+                            detail_path=d_dp,
+                            is_series=is_series,
+                            se=mapped_se,
+                            ep=mapped_ep,
+                            fetch_captions=False
+                        )
+                        if isinstance(r, dict) and r.get("files"):
+                            dub_res = {
+                                **result,
+                                "files": r["files"],
+                                "subtitles": r.get("subtitles", []),
+                                "hls": r.get("hls", []),
+                                "dash": r.get("dash", []),
+                                "subject_id": d_sid,
+                                "detail_path": d_dp,
+                            }
+                            _cache_set(f"download:v4:{d_sid}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
+                            _cache_set(f"download:{d_dp}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
+                            lan = (d.get("lanCode") or d.get("lanName") or "").lower()
+                            if lan:
+                                _cache_set(f"download:{target_detail_path}:{eff_se}:{eff_ep}:{lan}", dub_res, DETAILS_TTL)
                     except Exception as e:
-                        logger.debug(f"Dub prewarm notice: {e}")
-                asyncio.create_task(_prewarm_other_dubs_task())
+                        logger.debug(f"Dub parallel warm notice: {e}")
+
+                async def _prewarm_all_dubs_task():
+                    try:
+                        await asyncio.sleep(0.3)
+                        dub_tasks = [_warm_one_dub(d) for d in raw_dubs if str(d.get("subjectId")) != target_subject_id]
+                        if dub_tasks:
+                            await asyncio.gather(*dub_tasks, return_exceptions=True)
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_prewarm_all_dubs_task())
 
         return result
     except HTTPException:
@@ -2296,33 +2307,6 @@ async def get_download_links(
         raise HTTPException(status_code=502, detail=str(e))
 
 
-
-@app.get("/api/proxy-test")
-async def proxy_test(url: str):
-    results = {}
-    try:
-        async with httpx.AsyncClient(http2=False, timeout=5) as c:
-            r = await c.get(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-10", "User-Agent": "curl/8.2.1"})
-            results["http1_curl"] = {"status": r.status_code, "headers": dict(r.headers), "text": r.text[:50]}
-    except Exception as e:
-        results["http1_curl"] = {"error": str(e)}
-
-    try:
-        async with httpx.AsyncClient(http2=True, timeout=5) as c:
-            r = await c.get(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-10", "User-Agent": "curl/8.2.1"})
-            results["http2_curl"] = {"status": r.status_code, "headers": dict(r.headers), "text": r.text[:50]}
-    except Exception as e:
-        results["http2_curl"] = {"error": str(e)}
-
-    try:
-        import urllib.request
-        req = urllib.request.Request(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-10", "User-Agent": "curl/8.2.1"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            results["urllib"] = {"status": resp.status, "headers": dict(resp.headers)}
-    except Exception as e:
-        results["urllib"] = {"error": str(e)}
-
-    return results
 
 @app.get("/api/proxy")
 async def proxy_stream(url: str, request: Request):
