@@ -15,4 +15,4 @@ ENV PORT=8000
 EXPOSE 8000
 
 # Ultra-fast production server with uvloop, httptools, and multi-worker concurrency
-CMD uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers 2 --loop uvloop --http httptools
+CMD uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers 1 --loop uvloop --http httptools

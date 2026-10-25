@@ -229,7 +229,13 @@ async def _get_bearer_token(force_refresh: bool = False) -> str:
 
         try:
             client = _get_client()
-            resp = await client.get(f"{API_BASE}/home?host=moviebox.ph", headers=DEFAULT_HEADERS)
+            headers = {
+                **DEFAULT_HEADERS,
+                "X-Forwarded-For": "103.191.240.1",
+                "X-Real-IP": "103.191.240.1",
+                "Client-IP": "103.191.240.1",
+            }
+            resp = await client.get(f"{API_BASE}/home?host=moviebox.ph", headers=headers, timeout=6.0)
             x_user = resp.headers.get("x-user")
             if x_user:
                 try:
@@ -252,8 +258,6 @@ async def _get_bearer_token(force_refresh: bool = False) -> str:
 
 async def _background_cache_warmer():
     """Background cache pre-warmer: keeps homepage hot with zero cold starts."""
-    # Initial quick warm-up
-    await asyncio.sleep(0.5)
     while True:
         try:
             logger.info("Pre-warming MovieBox homepage cache in background...")
@@ -264,17 +268,30 @@ async def _background_cache_warmer():
         await asyncio.sleep(900)
 
 
+async def _init_background_tasks():
+    """Acquire token and initialize background warmer after health check is responsive."""
+    try:
+        await _get_bearer_token()
+    except Exception as e:
+        logger.warning(f"Initial token notice: {e}")
+    # Give the container 10 seconds to respond to Render health check before starting warmer
+    await asyncio.sleep(10)
+    try:
+        await _background_cache_warmer()
+    except Exception as e:
+        logger.warning(f"Background warmer notice: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     client = _get_client()
     app.state.client = client
     logger.info("Shared HTTP/2 httpx connection pool initialized.")
-    await _get_bearer_token()
-    warmup_task = asyncio.create_task(_background_cache_warmer())
+    bg_task = asyncio.create_task(_init_background_tasks())
     try:
         yield
     finally:
-        warmup_task.cancel()
+        bg_task.cancel()
         if _GLOBAL_CLIENT and not _GLOBAL_CLIENT.is_closed:
             await _GLOBAL_CLIENT.aclose()
 
@@ -432,14 +449,12 @@ async def _rec_get(path: str, params: dict | None = None) -> dict | list:
         **DEFAULT_HEADERS,
         "Authorization": f"Bearer {token}" if token else ""
     }
-    ip = _resolve_spoofed_ip(params=params)
-    if ip:
-        headers.update({
-            "X-Forwarded-For": ip,
-            "X-Real-IP": ip,
-            "Client-IP": ip,
-            "CF-Connecting-IP": ip
-        })
+    ip = _resolve_spoofed_ip(params=params) or "103.191.240.1"
+    headers.update({
+        "X-Forwarded-For": ip,
+        "X-Real-IP": ip,
+        "Client-IP": ip,
+    })
 
     client = _get_client()
     r = await client.get(REC_BASE + path, params=params or {}, headers=headers)
@@ -458,14 +473,12 @@ async def _api_post(path: str, json_body: dict, retry: bool = True) -> dict | li
         **DEFAULT_HEADERS,
         "Authorization": f"Bearer {token}" if token else ""
     }
-    ip = _resolve_spoofed_ip(json_body=json_body)
-    if ip:
-        headers.update({
-            "X-Forwarded-For": ip,
-            "X-Real-IP": ip,
-            "Client-IP": ip,
-            "CF-Connecting-IP": ip
-        })
+    ip = _resolve_spoofed_ip(json_body=json_body) or "103.191.240.1"
+    headers.update({
+        "X-Forwarded-For": ip,
+        "X-Real-IP": ip,
+        "Client-IP": ip,
+    })
 
     client = _get_client()
     r = await client.post(BASE + path, json=json_body, headers=headers)
