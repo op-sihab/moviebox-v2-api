@@ -11,6 +11,7 @@ import contextvars
 import json
 import logging
 import os
+import random
 import re
 import time
 from contextlib import asynccontextmanager
@@ -382,25 +383,21 @@ def _resolve_spoofed_ip(params: dict | None = None, json_body: dict | None = Non
 
     ip = client_ip_var.get()
 
-    if not ip or ip in ("127.0.0.1", "localhost", "::1"):
-        return "103.191.240.1"
+    def _get_random_bangla_ip():
+        subnets = ["103.191.240.", "103.191.241.", "103.134.58.", "103.205.180.", "119.30.38."]
+        return f"{random.choice(subnets)}{random.randint(2, 250)}"
 
     if (
-        ip.startswith("10.") or 
-        ip.startswith("192.168.") or 
-        ip.startswith("172.16.") or 
-        ip.startswith("172.17.") or 
-        ip.startswith("172.18.") or 
-        ip.startswith("172.19.") or 
-        ip.startswith("172.2") or 
-        ip.startswith("172.3") or
-        ip.startswith("216.24.") or
-        ip.startswith("104.") or
-        ip.startswith("172.6") or
-        ip.startswith("172.7") or
-        ip.startswith("162.158.")
+        not ip 
+        or ip in ("127.0.0.1", "localhost", "::1")
+        or ip.startswith("10.")
+        or ip.startswith("192.168.")
+        or ip.startswith("172.")
+        or ip.startswith("216.24.")
+        or ip.startswith("104.")
+        or ip.startswith("162.158.")
     ):
-        return "103.191.240.1"
+        return _get_random_bangla_ip()
 
     return ip
 
@@ -1643,6 +1640,32 @@ async def _auto_detect_tmdb_type(tmdb_id: int) -> str:
         return "movie"
 
 
+def _map_continuous_episode(shaped_seasons: list[dict], se: int, ep: int) -> tuple[int, int]:
+    """Seamlessly maps continuous / grouped TV season coordinates (e.g. Lupin S1 Ep6 -> S2 Ep1)."""
+    if not shaped_seasons or se <= 0 or ep <= 0:
+        return se, ep
+
+    # Direct match within valid range
+    target_s = next((s for s in shaped_seasons if (s.get("se") or s.get("season")) == se), None)
+    if target_s:
+        max_ep = target_s.get("maxEp") or target_s.get("episode_count") or 0
+        if 0 < ep <= max_ep:
+            return se, ep
+
+    # If episode exceeds target season maxEp (e.g. TMDB grouped season 1 with 10 eps when MB has 5)
+    cum = 0
+    for s in shaped_seasons:
+        s_num = s.get("se") or s.get("season") or 1
+        max_ep = s.get("maxEp") or s.get("episode_count") or 0
+        if max_ep <= 0:
+            continue
+        if ep <= cum + max_ep:
+            return s_num, ep - cum
+        cum += max_ep
+
+    return se, ep
+
+
 async def _fetch_moviebox_play_streams(
     subject_id: str,
     detail_path: str,
@@ -2108,14 +2131,28 @@ async def get_download_links(
         dash = []
         has_res = False
 
-        # 2. Fetch direct MovieBox official play streams (1080p, 720p, 480p, 360p all unlocked)
+        # 2. Resolve MovieBox continuous episode coordinates (e.g. Lupin S1 Ep6 -> S2 Ep1)
+        shaped_seasons = _shape_seasons(details_data) if is_series else None
+        mapped_se, mapped_ep = eff_se, eff_ep
+        if is_series and shaped_seasons:
+            mapped_se, mapped_ep = _map_continuous_episode(shaped_seasons, eff_se, eff_ep)
+
+        # Fetch direct MovieBox official play streams (1080p, 720p, 480p, 360p all unlocked)
         mb_streams = await _fetch_moviebox_play_streams(
             subject_id=target_subject_id,
             detail_path=target_detail_path,
             is_series=is_series,
-            se=eff_se,
-            ep=eff_ep
+            se=mapped_se,
+            ep=mapped_ep
         )
+        if (not mb_streams or not mb_streams.get("files")) and (mapped_se != eff_se or mapped_ep != eff_ep):
+            mb_streams = await _fetch_moviebox_play_streams(
+                subject_id=target_subject_id,
+                detail_path=target_detail_path,
+                is_series=is_series,
+                se=eff_se,
+                ep=eff_ep
+            )
         if mb_streams and mb_streams.get("files"):
             files.extend(mb_streams.get("files", []))
             captions.extend(mb_streams.get("subtitles", []))
@@ -2217,32 +2254,24 @@ async def get_download_links(
             if is_series and eff_ep > 0:
                 asyncio.create_task(_background_prefetch_next_ep(detail_path_slug, eff_se, eff_ep + 1))
 
-            # Predictive parallel pre-warm of all available audio dubs for current episode
+            # Gentle background pre-warm of at most 1-2 primary dubs with delay (avoids 429 rate limit)
             if raw_dubs and len(raw_dubs) > 1:
                 async def _prewarm_other_dubs_task():
                     try:
-                        tasks = []
-                        valid_dubs = []
-                        for d in raw_dubs:
+                        await asyncio.sleep(2.0)  # Wait for primary stream to comfortably start playing
+                        for d in raw_dubs[:2]:
                             d_sid = str(d.get("subjectId") or "")
                             d_dp = str(d.get("detailPath") or d_sid)
                             if d_sid and d_sid != target_subject_id:
-                                valid_dubs.append(d)
-                                tasks.append(_fetch_moviebox_play_streams(
+                                r = await _fetch_moviebox_play_streams(
                                     subject_id=d_sid,
                                     detail_path=d_dp,
                                     is_series=is_series,
-                                    se=eff_se,
-                                    ep=eff_ep,
+                                    se=mapped_se,
+                                    ep=mapped_ep,
                                     fetch_captions=False
-                                ))
-                        if tasks:
-                            res_list = await asyncio.gather(*tasks, return_exceptions=True)
-                            for idx, r in enumerate(res_list):
+                                )
                                 if isinstance(r, dict) and r.get("files"):
-                                    d = valid_dubs[idx]
-                                    d_sid = str(d.get("subjectId") or "")
-                                    d_dp = str(d.get("detailPath") or d_sid)
                                     dub_res = {
                                         **result,
                                         "files": r["files"],
@@ -2254,6 +2283,7 @@ async def get_download_links(
                                     }
                                     _cache_set(f"download:v4:{d_sid}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
                                     _cache_set(f"download:{d_dp}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
+                                await asyncio.sleep(1.0)
                     except Exception as e:
                         logger.debug(f"Dub prewarm notice: {e}")
                 asyncio.create_task(_prewarm_other_dubs_task())
