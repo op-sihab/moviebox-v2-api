@@ -2217,6 +2217,47 @@ async def get_download_links(
             if is_series and eff_ep > 0:
                 asyncio.create_task(_background_prefetch_next_ep(detail_path_slug, eff_se, eff_ep + 1))
 
+            # Predictive parallel pre-warm of all available audio dubs for current episode
+            if raw_dubs and len(raw_dubs) > 1:
+                async def _prewarm_other_dubs_task():
+                    try:
+                        tasks = []
+                        valid_dubs = []
+                        for d in raw_dubs:
+                            d_sid = str(d.get("subjectId") or "")
+                            d_dp = str(d.get("detailPath") or d_sid)
+                            if d_sid and d_sid != target_subject_id:
+                                valid_dubs.append(d)
+                                tasks.append(_fetch_moviebox_play_streams(
+                                    subject_id=d_sid,
+                                    detail_path=d_dp,
+                                    is_series=is_series,
+                                    se=eff_se,
+                                    ep=eff_ep,
+                                    fetch_captions=False
+                                ))
+                        if tasks:
+                            res_list = await asyncio.gather(*tasks, return_exceptions=True)
+                            for idx, r in enumerate(res_list):
+                                if isinstance(r, dict) and r.get("files"):
+                                    d = valid_dubs[idx]
+                                    d_sid = str(d.get("subjectId") or "")
+                                    d_dp = str(d.get("detailPath") or d_sid)
+                                    dub_res = {
+                                        **result,
+                                        "files": r["files"],
+                                        "subtitles": r.get("subtitles", []),
+                                        "hls": r.get("hls", []),
+                                        "dash": r.get("dash", []),
+                                        "subject_id": d_sid,
+                                        "detail_path": d_dp,
+                                    }
+                                    _cache_set(f"download:v4:{d_sid}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
+                                    _cache_set(f"download:{d_dp}:{eff_se}:{eff_ep}:", dub_res, DETAILS_TTL)
+                    except Exception as e:
+                        logger.debug(f"Dub prewarm notice: {e}")
+                asyncio.create_task(_prewarm_other_dubs_task())
+
         return result
     except HTTPException:
         raise
