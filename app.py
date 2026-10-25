@@ -2309,8 +2309,22 @@ async def proxy_stream(url: str, request: Request):
         "Referer": "https://moviebox.ph/",
         "Accept": "*/*",
     }
-    if range_header:
-        req_headers["range"] = range_header
+    CHUNK_SIZE = 3 * 1024 * 1024  # 3 MB chunks for instant initial buffering
+    forward_range = range_header
+    if range_header and range_header.startswith("bytes="):
+        parts = range_header.replace("bytes=", "").split("-")
+        try:
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else None
+            if end is None or (end - start) > CHUNK_SIZE:
+                forward_range = f"bytes={start}-{start + CHUNK_SIZE - 1}"
+        except Exception:
+            pass
+    elif not range_header:
+        forward_range = f"bytes=0-{CHUNK_SIZE - 1}"
+
+    if forward_range:
+        req_headers["range"] = forward_range
 
     client = _get_client()
     try:
