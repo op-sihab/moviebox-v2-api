@@ -22,7 +22,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 try:
     import orjson
@@ -2295,6 +2295,49 @@ async def get_download_links(
         logger.error(f"Error fetching download links for '{detail_path}': {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
+
+
+@app.get("/api/proxy")
+async def proxy_stream(url: str, request: Request):
+    """Ultra-fast zero-copy streaming proxy with moviebox.ph referer bypass and full HTTP Range support."""
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    range_header = request.headers.get("range")
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "Referer": "https://moviebox.ph/",
+        "Accept": "*/*",
+    }
+    if range_header:
+        req_headers["range"] = range_header
+
+    client = _get_client()
+    try:
+        req = client.build_request("GET", url, headers=req_headers)
+        r = await client.send(req, stream=True)
+
+        resp_headers = {
+            "Content-Type": r.headers.get("content-type", "video/mp4"),
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges",
+        }
+        if "content-range" in r.headers:
+            resp_headers["Content-Range"] = r.headers["content-range"]
+        if "content-length" in r.headers:
+            resp_headers["Content-Length"] = r.headers["content-length"]
+
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=resp_headers,
+            background=r.aclose
+        )
+    except Exception as e:
+        logger.error(f"Stream proxy error: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
 @app.get("/api/stream/{subject_id}")
 async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1, ep: int = 1):
