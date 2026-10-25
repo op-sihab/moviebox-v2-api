@@ -2297,6 +2297,33 @@ async def get_download_links(
 
 
 
+@app.get("/api/proxy-test")
+async def proxy_test(url: str):
+    results = {}
+    try:
+        async with httpx.AsyncClient(http2=False, timeout=5) as c:
+            r = await c.get(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-10", "User-Agent": "curl/8.2.1"})
+            results["http1_curl"] = {"status": r.status_code, "headers": dict(r.headers), "text": r.text[:50]}
+    except Exception as e:
+        results["http1_curl"] = {"error": str(e)}
+
+    try:
+        async with httpx.AsyncClient(http2=True, timeout=5) as c:
+            r = await c.get(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-10", "User-Agent": "curl/8.2.1"})
+            results["http2_curl"] = {"status": r.status_code, "headers": dict(r.headers), "text": r.text[:50]}
+    except Exception as e:
+        results["http2_curl"] = {"error": str(e)}
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={"Referer": "https://moviebox.ph/", "Range": "bytes=0-10", "User-Agent": "curl/8.2.1"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            results["urllib"] = {"status": resp.status, "headers": dict(resp.headers)}
+    except Exception as e:
+        results["urllib"] = {"error": str(e)}
+
+    return results
+
 @app.get("/api/proxy")
 async def proxy_stream(url: str, request: Request):
     """Ultra-fast zero-copy streaming proxy with moviebox.ph referer bypass and full HTTP Range support."""
