@@ -903,7 +903,7 @@ def _is_ad_or_promo(title_str: str) -> bool:
 @app.get("/api/moviebox/home")
 async def get_moviebox_home():
     """Curated South Asian (Bangladesh & India) trending home feed with HD banners, Bollywood, South Indian, Anime, and TV hits."""
-    cache_key = "home:formatted:v2"
+    cache_key = "home:formatted:v3"
     cached = _cache_get(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
@@ -952,6 +952,7 @@ async def get_moviebox_home():
                     poster = tmdb_info.get("poster") or orig_poster_img or orig_banner_img
                     tmdb_id = tmdb_info.get("tmdb_id")
 
+                    is_tv = (sub.get("subjectType") == 2) or (item.get("subjectType") == 2) or (sub.get("subjectType") == 7)
                     items.append({
                         "name": name,
                         "banner_image": backdrop,
@@ -962,6 +963,9 @@ async def get_moviebox_home():
                         "tmdb_id": tmdb_id,
                         "slug": slug,
                         "subject_id": sid,
+                        "subjectType": 2 if is_tv else 1,
+                        "subject_type": "TV_SERIES" if is_tv else "MOVIE",
+                        "media_type": "tv" if is_tv else "movie",
                         "badge": sub.get("corner") or ("Hindi Dub" if "[Hindi]" in name else None),
                         "detail_url": f"/details/{slug or sid}",
                         "stream_url": f"/download/{slug or sid}"
@@ -1006,6 +1010,9 @@ async def get_moviebox_home():
                     "poster_url": (sub.get("cover") or {}).get("url"),
                     "slug": sub.get("detailPath"),
                     "subject_id": sub.get("subjectId"),
+                    "subjectType": 2 if sub.get("subjectType") in (2, 7) else 1,
+                    "subject_type": "TV_SERIES" if sub.get("subjectType") in (2, 7) else "MOVIE",
+                    "media_type": "tv" if sub.get("subjectType") in (2, 7) else "movie",
                     "badge": sub.get("corner") or (
                         "Hindi Dub" if "[Hindi]" in (sub.get("title") or "")
                         else ("Bengali" if "[Bengali]" in (sub.get("title") or "") else None)
