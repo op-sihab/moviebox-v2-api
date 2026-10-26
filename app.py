@@ -1728,6 +1728,14 @@ async def _fetch_moviebox_play_streams(
 
                 if play_resp.status_code == 200:
                     cand_json = play_resp.json().get("data", {})
+                    cand_streams = cand_json.get("streams", [])
+                    has_playable_url = any(bool(s.get("url")) for s in cand_streams)
+                    if not has_playable_url and not cand_json.get("dash") and not cand_json.get("hls"):
+                        token = await _get_bearer_token(force_refresh=True)
+                        headers["Authorization"] = f"Bearer {token}" if token else ""
+                        play_resp = await client.get(play_url, headers=headers)
+                        if play_resp.status_code == 200:
+                            cand_json = play_resp.json().get("data", {})
                     if cand_json.get("streams") or cand_json.get("dash") or cand_json.get("hls"):
                         play_data = cand_json
                         break
@@ -2160,7 +2168,10 @@ async def get_download_links(
             dash.extend(mb_streams.get("dash", []))
 
         # 3. Fallback to Net27 Engine if MovieBox has no streams
-        if not files and tmdb_id:
+        # Note: Net27 only hosts Original English audio. NEVER fallback to Net27 for non-English dubs (e.g. Hindi)
+        # to prevent injecting English audio and poisoning the dub cache!
+        is_non_english_dub = bool(eff_dub and eff_dub.lower() not in ("en", "english", "original", ""))
+        if not files and tmdb_id and not is_non_english_dub:
             net27_data = await _fetch_net27_stream_sources(
                 tmdb_id=tmdb_id,
                 is_series=is_series,
