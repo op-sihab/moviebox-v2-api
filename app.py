@@ -1716,14 +1716,17 @@ async def _fetch_moviebox_play_streams(
                 **PLAYER_HEADERS,
                 **ip_headers,
                 "Referer": player_referer,
-                "Authorization": f"Bearer {token}" if token else ""
+                "Origin": domain,
+                "Authorization": f"Bearer {token}" if token else "",
+                "Cookie": f"token={token}" if token else ""
             }
 
             try:
                 play_resp = await client.get(play_url, headers=headers)
-                if play_resp.status_code in (401, 403):
+                if play_resp.status_code in (401, 403, 406):
                     token = await _get_bearer_token(force_refresh=True)
                     headers["Authorization"] = f"Bearer {token}" if token else ""
+                    headers["Cookie"] = f"token={token}" if token else ""
                     play_resp = await client.get(play_url, headers=headers)
 
                 if play_resp.status_code == 200:
@@ -1733,10 +1736,13 @@ async def _fetch_moviebox_play_streams(
                     if not has_playable_url and not cand_json.get("dash") and not cand_json.get("hls"):
                         token = await _get_bearer_token(force_refresh=True)
                         headers["Authorization"] = f"Bearer {token}" if token else ""
+                        headers["Cookie"] = f"token={token}" if token else ""
                         play_resp = await client.get(play_url, headers=headers)
                         if play_resp.status_code == 200:
                             cand_json = play_resp.json().get("data", {})
-                    if cand_json.get("streams") or cand_json.get("dash") or cand_json.get("hls"):
+                            cand_streams = cand_json.get("streams", [])
+                            has_playable_url = any(bool(s.get("url")) for s in cand_streams)
+                    if has_playable_url or cand_json.get("dash") or cand_json.get("hls"):
                         play_data = cand_json
                         break
             except Exception:
@@ -1754,12 +1760,16 @@ async def _fetch_moviebox_play_streams(
                         **PLAYER_HEADERS,
                         **ip_headers,
                         "Referer": player_referer,
-                        "Authorization": f"Bearer {token}" if token else ""
+                        "Origin": domain,
+                        "Authorization": f"Bearer {token}" if token else "",
+                        "Cookie": f"token={token}" if token else ""
                     }
                     retry_resp = await client.get(retry_url, headers=headers)
                     if retry_resp.status_code == 200:
                         cand_json = retry_resp.json().get("data", {})
-                        if cand_json.get("streams") or cand_json.get("dash") or cand_json.get("hls"):
+                        cand_streams = cand_json.get("streams", [])
+                        has_playable_url = any(bool(s.get("url")) for s in cand_streams)
+                        if has_playable_url or cand_json.get("dash") or cand_json.get("hls"):
                             play_data = cand_json
                             break
                 except Exception:
@@ -2050,7 +2060,17 @@ async def get_download_links(
         except Exception:
             details_data = {}
 
-        if not details_data:
+        if not details_data or not (details_data or {}).get("subject"):
+            if candidate:
+                tmdb_cand = await _resolve_tmdb_info(candidate, is_series=None)
+                if tmdb_cand and tmdb_cand.get("tmdb_id"):
+                    return await get_tmdb_direct_stream(
+                        tmdb_id=tmdb_cand["tmdb_id"],
+                        type=tmdb_cand.get("media_type") or "movie",
+                        season=season_val or 1,
+                        episode=episode_val or 1,
+                        dub=dub or ""
+                    )
             dub_meta = _DUB_REGISTRY.get(detail_path) or _cache_get(f"dub_meta:{detail_path}")
             if dub_meta and dub_meta.get("tmdb_id"):
                 return await get_tmdb_direct_stream(
@@ -2168,10 +2188,7 @@ async def get_download_links(
             dash.extend(mb_streams.get("dash", []))
 
         # 3. Fallback to Net27 Engine if MovieBox has no streams
-        # Note: Net27 only hosts Original English audio. NEVER fallback to Net27 for non-English dubs (e.g. Hindi)
-        # to prevent injecting English audio and poisoning the dub cache!
-        is_non_english_dub = bool(eff_dub and eff_dub.lower() not in ("en", "english", "original", ""))
-        if not files and tmdb_id and not is_non_english_dub:
+        if not files and tmdb_id:
             net27_data = await _fetch_net27_stream_sources(
                 tmdb_id=tmdb_id,
                 is_series=is_series,
